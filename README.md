@@ -1,4 +1,4 @@
-# Achtung, die Kurv clone written in Clojure
+# Achtung, die Kurve clone written in Clojure
 
 A hobby project, implementing a [clone of the original game](https://achtungdiekurve.net/) in Clojure.
 
