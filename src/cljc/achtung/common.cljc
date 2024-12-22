@@ -7,6 +7,10 @@
 
 (def pi2 (* 2 pi))
 
+(def QUIT-KEY q)
+
+(def RESTART-KEY r)
+
 (defn random-direction
   []
   (* pi2 (Math/random)))
@@ -94,11 +98,11 @@
   [state]
   (update state :players
           (fn [m]
-            (into {}
-                  (map
-                   (fn [[n {dir :direction :as r}]]
-                     [n (update r :trail progress-trail dir)])
-                   m)))))
+            (->> m
+                 (map
+                  (fn [[n {dir :direction :as r}]]
+                    [n (update r :trail progress-trail dir)]))
+                 (into {})))))
 (defn crosses?
   [[[x1 y1]   [x2 y2]   :as segment1]
    [[xt1 yt1] [xt2 yt2] :as segment2]]
@@ -111,8 +115,6 @@
   "Collision of a head with a trail occurs when the line between
   the last two points of the head crosses any point of the trail"
   [head-segment [s1 s2 & rest]]
-  ;;
-  (println rest)
   (if (nil? s2)
     false
     (or
@@ -179,31 +181,34 @@
   ;;noop
   state)
 
-(defn render
-  [canvas state]
-  ;;TODO
-  )
-
-(defn create-game-event
-  [players resolution evt]
+(defn build-game-event
+  "Returns a map with a key ::type signaling the event that happened,
+   with addition context that happened."
+  [{:keys [players key-event] :as cfg}]
   (let [player-left  (->> players
                           (filter (fn [{left :left}]
-                                    (= left evt)))
+                                    (= left key-event)))
                           first)
         player-right (->> players
                           (filter (fn [{right :right}]
-                                    (= right evt)))
+                                    (= right key-event)))
                           first)
-        stop         (= \q evt)
-        start        (= \r evt)]
-    (cond
-      player-left  [::player-move :left player-left resolution]
-      player-right [::player-move :right player-right resolution]
-      start        [::start players resolution]
-      stop         [::stop players resolution])))
+        stop         (= QUIT-KEY key-event)
+        start        (= RESTART-KEY key-event)]
+    (merge
+     cfg
+     (cond
+       player-left  {::type      :player-move
+                     ::direction :left
+                     ::player    player-left}
+       player-right {::type      :player-move
+                     ::direction :right
+                     ::player    player-right}
+       start        {::type :start}
+       stop         {::type :stop}))))
 
 (defn game
-  [players resolution] ;;vec of player configs
+  [{:keys [players resolution] :as cfg}] ;;vec of player configs
   (let [kill-chan     (async/chan)
         clock-chan    (create-clock kill-chan)
         key-chan      (async/chan) ;; all input from the keyboard is put on this channel
@@ -219,8 +224,8 @@
 
         clock-chan
         ([_]
-         (let [;;in game, bit lame to have this stuff here though..., optimize later
-               signal-buffer' (if (= (:view game-state) :game)
+         ;tick tock
+         (let [signal-buffer' (if (= (:view game-state) :game)
                                 (conj signal-buffer [::progress-players resolution])
                                 signal-buffer)
                game-state'    (reduce process-signal game-state signal-buffer)]
@@ -229,10 +234,10 @@
 
         key-chan
         ([e]
-         (let [game-event (create-game-event players resolution e)]
+         (let [game-event (build-game-event (assoc cfg :key-event e))]
            (recur game-state (conj signal-buffer game-event))))))
     ;; return this, so that the caller can get a handle on the channels
-    ;; to populate it with keyboard events
+    ;; to feed it with keyboard events
     ;; or kill the game
     ;; thus provide an input
     {:key-chan    key-chan
