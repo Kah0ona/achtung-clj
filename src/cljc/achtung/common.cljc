@@ -1,6 +1,7 @@
 (ns achtung.common
   "Namespace containing the game engine, game logic and game state. Does not render anything, just updates game state, and signals its updated state through a core async channel."
   (:require
+   [taoensso.timbre :refer [debug info error]]
    [clojure.core.async :as async]))
 
 (def pi 3.141592653589793)
@@ -178,13 +179,23 @@
 (defmethod process-signal
   :default
   [state _]
+  (debug :process-signal :default)
   ;;noop
   state)
+
+(def key-codes
+  {82 "r"
+   81 "q"
+   90 "z"
+   88 "x"
+   78 "n"
+   77 "m"})
 
 (defn build-game-event
   "Returns a map with a key ::type signaling the event that happened,
    with addition context that happened."
   [{:keys [players key-event] :as cfg}]
+  (debug :key-event key-event )
   (let [player-left  (->> players
                           (filter (fn [{left :left}]
                                     (= left key-event)))
@@ -224,11 +235,10 @@
 
         clock-chan
         ([_]
-         ;tick tock
-         (let [signal-buffer' (if (= (:view game-state) :game)
-                                (conj signal-buffer [::progress-players resolution])
-                                signal-buffer)
-               game-state'    (reduce process-signal game-state signal-buffer)]
+         ;;tick tock
+         (when (seq signal-buffer)
+           (debug signal-buffer))
+         (let [game-state' (reduce process-signal game-state signal-buffer)]
            (async/>! render-chan game-state')
            (recur game-state' [])))
 

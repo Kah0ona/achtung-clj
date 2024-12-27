@@ -12,18 +12,14 @@
 ;; also listen to user keyboard events, and put those events into the exposed keyboard-input chan
 (defn bind-keypresses
   [f keys]
-  (let [key-codes (->> keys
-                       (map (fn [key]
-                              (-> key
-                                  name
-                                  (.charCodeAt 0)
-                                  int)))
-                       set)]
-    (js/document.addEventListener
-     "keydown"
-     (fn [event]
-       (when (get key-codes (.-keyCode event))
-         (f (keyword (.-keyCode event))))))))
+  (js/document.addEventListener
+   "keydown"
+   (fn [event]
+     (debug :key-press
+            (.-keyCode event)
+            (get game/key-codes (.-keyCode event)))
+     (when-let [kc (get game/key-codes (.-keyCode event))]
+       (f (keyword kc))))))
 
 (defn register-keyboard-events
   [players handler-fn]
@@ -99,29 +95,36 @@
     :left  :n
     :right :m}])
 
+(def running-game
+  (atom nil))
+
 (defn start-game
   []
+  (js/console.log "Achtung app started!")
   (let [{:keys [kill-chan key-chan render-chan]
-         :as game-channels}
-        (game/game {:players players
-                    :resolution resolution})
+         :as   game-channels}
+        (or @running-game ;; hot reload should keep the game state running
+            (game/game {:players    players
+                        :resolution resolution}))
+        _             (reset! running-game game-channels)
         key-handle-fn (fn [e]
-                        (async/>! key-chan e))]
+                        (async/put! key-chan e))]
     (mount game-channels (js/document.getElementById "app"))
     (register-keyboard-events players key-handle-fn)
     (read-render-chan game-channels)))
 
 
-(defn init []
-  (js/console.log "Achtung app started!")
+(defn ^:dev/after-load hot-reload
+  []
   (start-game))
 
+(defn init []
+  (start-game))
 
 (comment
-  (def game
-    (game/game {:players players
-                :resolution resolution}))
 
-  (:render-chan game)
+  ;;to hard reset the atom / game, use this, and reload the namespace
+  ;; (ie. make code change)
+  (reset! running-game nil)
 
- )
+  )
