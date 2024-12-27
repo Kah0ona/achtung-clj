@@ -7,9 +7,9 @@
 
 (def pi2 (* 2 pi))
 
-(def QUIT-KEY q)
+(def QUIT-KEY :q)
 
-(def RESTART-KEY r)
+(def RESTART-KEY :r)
 
 (defn random-direction
   []

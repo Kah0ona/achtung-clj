@@ -1,11 +1,11 @@
-(ns achtung.index
-  (:require [achtung.common :as game]
-            [goog.dom as gdom]
-            [clojure.core.async :as async]
-            [reagent.core :as reagent]
-            [reagent.dom :as reagent-dom]
-            [taoensso.timbre :refer [debug info error]]
-            ))
+(ns ^:dev/always achtung.index
+  (:require
+   [achtung.common :as game]
+   [goog.dom :as gdom]
+   [reagent.core :as reagent]
+   [reagent.dom :as reagent-dom]
+   [clojure.core.async :as async]
+   [taoensso.timbre :refer [debug info error]]))
 
 ;; create and start a game, from the common ns
 ;; provide a rendering function that is used to render the game state to HTML/SVG or whatever
@@ -14,13 +14,16 @@
   [f keys]
   (let [key-codes (->> keys
                        (map (fn [key]
-                              (int (.charCodeAt key 0))))
+                              (-> key
+                                  name
+                                  (.charCodeAt 0)
+                                  int)))
                        set)]
     (js/document.addEventListener
      "keydown"
      (fn [event]
        (when (get key-codes (.-keyCode event))
-         (f (.-keyCode event)))))))
+         (f (keyword (.-keyCode event))))))))
 
 (defn register-keyboard-events
   [players handler-fn]
@@ -43,6 +46,7 @@
 (defn render!
   [canvas state]
   (let  [colors [:red :green :blue :yellow :magenta :orange]]
+    (.clearRect (.getContext canvas "2d") 0 0 (.-width canvas) (.-height canvas))
     (->> state
          :players
          (map (comp :trail last))
@@ -54,6 +58,7 @@
 (defn read-render-chan
   "Simply reads from the chan, gathers all other context, and calls render"
   [{:keys [target render-chan] :as opts}]
+  (assert render-chan)
   (let [canvas (gdom/getElement (or target "canvas"))]
     (async/go-loop []
       (let [game-state (async/<! render-chan)] ;; Read a value from the channel
@@ -61,10 +66,9 @@
         (recur)))))
 
 (defn ui
-  []
-  [:button {:on-click #()} "Start (over)"]
-  [:canvas#canvas {:width "1024" :height "768"}]
-  )
+  [{:keys [key-chan]}]
+  [:button {:on-click #(async/>! key-chan game/RESTART-KEY)} "Start (over)"]
+  [:canvas#canvas {:width "1024" :height "768"}])
 
 (def last-error (reagent/atom nil))
 
@@ -82,27 +86,42 @@
       component)}))
 
 (defn mount
-  [el]
-  (reagent-dom/render [error-boundary [ui]] el))
+  [game-channels el]
+  (reagent-dom/render [error-boundary [ui game-channels]] el))
+
+(def resolution [1024 768])
+
+(def players
+  [{:name  "Player 1"
+    :left  :z
+    :right :x}
+   {:name  "Player 2"
+    :left  :n
+    :right :m}])
 
 (defn start-game
   []
-  (let [resolution [1024 768]
-        players    [{:name  "Player 1"
-                     :left  "z"
-                     :right "x"}
-                    {:name  "Player 2"
-                     :left  ","
-                     :right "."}]
-        {:keys [kill-chan key-chan render-chan]}
+  (let [{:keys [kill-chan key-chan render-chan]
+         :as game-channels}
         (game/game {:players players
                     :resolution resolution})
         key-handle-fn (fn [e]
-                        (async/>!! key-chan e))]
-    (read-render-chan render-chan)
+                        (async/>! key-chan e))]
+    (mount game-channels (js/document.getElementById "app"))
     (register-keyboard-events players key-handle-fn)
-    (mount (js/document.getElementById "app"))))
+    (read-render-chan game-channels)))
+
 
 (defn init []
   (js/console.log "Achtung app started!")
   (start-game))
+
+
+(comment
+  (def game
+    (game/game {:players players
+                :resolution resolution}))
+
+  (:render-chan game)
+
+ )
