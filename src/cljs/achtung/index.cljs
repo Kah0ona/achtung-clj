@@ -2,10 +2,24 @@
   (:require
    [achtung.common :as game]
    [goog.dom :as gdom]
+   [re-frame.core :as rf]
    [reagent.core :as reagent]
    [reagent.dom :as reagent-dom]
    [clojure.core.async :as async]
    [taoensso.timbre :refer [debug info error]]))
+
+
+(def resolution [1024 768])
+
+(def players
+  [{:name  "Player 1"
+    :left  :z
+    :right :x}
+   {:name  "Player 2"
+    :left  :n
+    :right :m}])
+
+
 
 ;; create and start a game, from the common ns
 ;; provide a rendering function that is used to render the game state to HTML/SVG or whatever
@@ -37,34 +51,102 @@
       (.moveTo ctx start-x start-y)) ;; Move to the first point
     (doseq [[x y] (rest points)]
       (.lineTo ctx x y)) ;; Draw lines to the remaining points
+    (set! (.-strokeStyle ctx) (name color))
     (.stroke ctx))) ;; Render the line
 
-(defn render!
+(defn render-game-on-canvas!
   [canvas state]
-  (let  [colors [:red :green :blue :yellow :magenta :orange]]
-    (.clearRect (.getContext canvas "2d") 0 0 (.-width canvas) (.-height canvas))
-    (->> state
-         :players
-         (map (comp :trail last))
-         (map-indexed
-          (fn [[idx trail]]
-            (draw-line canvas trail (get colors idx))))
-         doall)))
+  (if canvas
+    (let  [colors [:red :green :blue :yellow :magenta :orange]]
+      (.clearRect (.getContext canvas "2d") 0 0 (.-width canvas) (.-height canvas))
+      (->> state
+           :players
+           (map (comp :trail last))
+           (map-indexed
+            (fn [idx trail]
+              (debug )
+              (draw-line canvas trail (get colors idx))))
+           doall))
+    (debug :NO-CANVAS)))
+
+(defn render!
+  [canvas {:keys [view] :as state}]
+  (when (= :game view)
+    (render-game-on-canvas! canvas state)
+    ;;noop else, in other cases we render a React component with scores / menu
+
+    ))
 
 (defn read-render-chan
   "Simply reads from the chan, gathers all other context, and calls render"
-  [{:keys [target render-chan] :as opts}]
+  [{:keys [render-chan] :as engine}]
   (assert render-chan)
-  (let [canvas (gdom/getElement (or target "canvas"))]
-    (async/go-loop []
-      (let [game-state (async/<! render-chan)] ;; Read a value from the channel
-        (render! canvas game-state)
-        (recur)))))
+  (async/go-loop []
+    (let [canvas (gdom/getElement "canvas")
+          game-state (async/<! render-chan)] ;; Read a value from the channel
+      ;; render this for non-canvas components
+      (rf/dispatch [::game game-state])
+      (render! canvas game-state)
+      (recur))))
+
+(defn score-panel
+  []
+  [:div "scorepanel"])
+
+(rf/reg-event-db
+ ::engine
+ (fn [db [_ engine]]
+   (assoc db ::engine engine)))
+
+(rf/reg-sub
+ ::engine
+ (fn [db _]
+   (::engine db)))
+
+(rf/reg-event-db
+ ::game
+ (fn [db [_ game]]
+   (assoc db ::game game)))
+
+(rf/reg-sub
+ ::game
+ (fn [db _]
+   (::game db)))
+
+(defn menu-panel
+  [{:keys [key-chan] :as game-channels}]
+  [:div.toolbar
+   [:button
+    {:on-click #(async/put! key-chan game/RESTART-KEY)} "Start (over)"]])
+
+(defn start-engine!
+  []
+  (debug :start-engine!)
+  (let [engine (game/game {:players    players
+                           :resolution resolution})]
+    (register-keyboard-events
+     players
+     (fn [e]
+       (debug :key-event e)
+       (async/put! (:key-chan engine) e)))
+    (read-render-chan engine)
+    (rf/dispatch [::engine engine])))
 
 (defn ui
-  [{:keys [key-chan]}]
-  [:button {:on-click #(async/>! key-chan game/RESTART-KEY)} "Start (over)"]
-  [:canvas#canvas {:width "1024" :height "768"}])
+  [cfg]
+  (let [game   (rf/subscribe [::game])
+        engine (rf/subscribe [::engine])]
+    (when-not @game
+      (start-engine!))
+    (fn [cfg]
+      [:div
+       (case (:view @game)
+         :score [score-panel @game]
+         :menu  [menu-panel @engine]
+         :game  [:canvas#canvas
+                 {:width  (first resolution)
+                  :height (last resolution)}]
+         [menu-panel @engine])])))
 
 (def last-error (reagent/atom nil))
 
@@ -81,50 +163,34 @@
       (debug "error boundary hit")
       component)}))
 
-(defn mount
-  [game-channels el]
-  (reagent-dom/render [error-boundary [ui game-channels]] el))
-
-(def resolution [1024 768])
-
-(def players
-  [{:name  "Player 1"
-    :left  :z
-    :right :x}
-   {:name  "Player 2"
-    :left  :n
-    :right :m}])
-
-(def running-game
-  (atom nil))
+(defn ^:dev/after-load mount
+  [el]
+  (reagent-dom/render [error-boundary [ui cfg]] el))
 
 (defn start-game
   []
-  (js/console.log "Achtung app started!")
-  (let [{:keys [kill-chan key-chan render-chan]
-         :as   game-channels}
-        (or @running-game ;; hot reload should keep the game state running
-            (game/game {:players    players
-                        :resolution resolution}))
-        _             (reset! running-game game-channels)
-        key-handle-fn (fn [e]
-                        (async/put! key-chan e))]
-    (mount game-channels (js/document.getElementById "app"))
-    (register-keyboard-events players key-handle-fn)
-    (read-render-chan game-channels)))
-
-
-(defn ^:dev/after-load hot-reload
-  []
-  (start-game))
+  (debug "Achtung die Kurve started!")
+  (mount (js/document.getElementById "app")))
 
 (defn init []
   (start-game))
 
 (comment
 
-  ;;to hard reset the atom / game, use this, and reload the namespace
-  ;; (ie. make code change)
-  (reset! running-game nil)
+  @(rf/subscribe [::game])
+
+  (def engine
+    @(rf/subscribe [::engine]))
+
+  (def key-chan (:key-chan engine))
+
+  (async/put! (:kill-chan @engine) "r")
+
+  (async/put! key-chan game/RESTART-KEY)
+
+  key-chan
+
+  (game/initial-game-state
+   {:players players})
 
   )

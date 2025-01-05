@@ -21,18 +21,33 @@
   [(int (* (Math/random) res-x))
    (int (* (Math/random) res-y))])
 
-(def speed-multiplier 1)
-(def turning-speed-multiplier 1)
+(def speed-multiplier 3)
+(def turning-speed-multiplier 0.2)
+
+(defn key-by
+  [f m]
+  (->> m
+       (group-by f)
+       (map (fn [[k rs]]
+              [k (first rs)]))
+       (into {})))
+
+(declare progress-trail)
 
 (defn initial-game-state
-  [players resolution]
+  [{:keys [players resolution]}]
   {:game-over-players #{}
    ;;the degree where the head is pointing to. 0 is north, 90 is east, 180 south, 270 west
-   :players           (zipmap (map :name players)
-                              {:direction (random-direction)
-                               :trail     [(random-start-point resolution)]})
-   :view              :menu ;; or shows a :game, or a :score panel when game is over
-   })
+   :players           (->> players
+                           (map (fn [p]
+                                  (let [rd           (random-direction)
+                                        rp           (random-start-point resolution)
+                                        head-segment (progress-trail [rp] rd)]
+                                    (merge p
+                                           {:direction rd
+                                            :trail     head-segment}))))
+                           (key-by :name))
+   :view              :game})
 
 (defn create-clock
   "returns a chan that ticks 60 times per second, returning the number of frames that have passed"
@@ -43,6 +58,7 @@
         (async/alt!
           kill-chan
           ([_]
+           (debug ::kill)
            (async/close! c))
           timeout
           ([_]
@@ -50,7 +66,9 @@
            (recur (inc s))))))
     c))
 
-(defmulti process-signal :type)
+(defmulti process-signal
+  (fn [state signal]
+    (::type signal)))
 
 (defn round0
   "Round a double to an int"
@@ -74,43 +92,76 @@
 
 (defmethod process-signal
   ::player-move
-  [state [_ direction {:keys [name] :as player}]]
-  (update-in state [:players name :direction]
-             (fn [current-dir]
-               ;;calc delta
-               (+ current-dir
+  [state {::keys [direction player] :as o}]
+  (update-in state [:players (:name player) :direction]
+             (fn [current-direction]
+               (+ current-direction
                   (if (= :left direction)
                     (* -1 turning-speed-multiplier)
                     turning-speed-multiplier)))))
 
 (defmethod process-signal
   ::start
-  [state [_ players resolution]]
+  [state cfg]
   (->
-   (initial-game-state players resolution)
+   (initial-game-state cfg)
    (assoc :view :game)))
+
 
 (defmethod process-signal
   ::stop
-  [state [_ players resolution]]
-  (initial-game-state players resolution))
+  [{:keys [players resolution] :as state} cfg]
+  (->
+   (initial-game-state cfg)
+   (assoc :view :menu)))
 
 (defn update-trails
   [state]
-  (update state :players
-          (fn [m]
-            (->> m
+  (update state
+          :players
+          (fn [players]
+            (->> players
                  (map
-                  (fn [[n {dir :direction :as r}]]
-                    [n (update r :trail progress-trail dir)]))
+                  (fn [[n {:keys [direction] :as player}]]
+                    [n (update player :trail progress-trail direction)]))
                  (into {})))))
+
+(defn orientation
+  "Returns the orientation of three points (p, q, r) in a 2D plane.
+  -1 -> counterclockwise
+   1 -> clockwise
+   0 -> collinear"
+  [[px py] [qx qy] [rx ry]]
+  (let [val (- (* (- qy py) (- rx qx))
+               (* (- qx px) (- ry qy)))]
+    (cond
+      (> val 0) 1
+      (< val 0) -1
+      :else 0)))
+
+(defn on-segment?
+  "Checks if point r lies on the line segment pq."
+  [[px py] [qx qy] [rx ry]]
+  (and (<= (min px qx) rx (max px qx))
+       (<= (min py qy) ry (max py qy))))
+
 (defn crosses?
-  [[[x1 y1]   [x2 y2]   :as segment1]
+  "Checks if two line segments segment1 and segment2 intersect."
+  [[[x1 y1] [x2 y2] :as segment1]
    [[xt1 yt1] [xt2 yt2] :as segment2]]
-  (or
-   (and (<= x1 ))
-   ;;or check with reverse ordering of args
-   (crosses? segment2 segment1)))
+  (let [o1 (orientation [x1 y1] [x2 y2] [xt1 yt1])
+        o2 (orientation [x1 y1] [x2 y2] [xt2 yt2])
+        o3 (orientation [xt1 yt1] [xt2 yt2] [x1 y1])
+        o4 (orientation [xt1 yt1] [xt2 yt2] [x2 y2])]
+    (or
+      ;; General case: orientations are different
+      (and (not= o1 o2) (not= o3 o4))
+
+      ;; Special cases: collinear points lying on segments
+      (and (= o1 0) (on-segment? [x1 y1] [x2 y2] [xt1 yt1]))
+      (and (= o2 0) (on-segment? [x1 y1] [x2 y2] [xt2 yt2]))
+      (and (= o3 0) (on-segment? [xt1 yt1] [xt2 yt2] [x1 y1]))
+      (and (= o4 0) (on-segment? [xt1 yt1] [xt2 yt2] [x2 y2])))))
 
 (defn trail-collides?
   "Collision of a head with a trail occurs when the line between
@@ -122,39 +173,29 @@
      (crosses? head-segment [s1 s2])
      (trail-collides? head-segment rest))))
 
-
-(comment
-  (trail-collides? [[0 0] [0 1]]
-                   [[0 0] [0 1] [0 2] [0 3]])
-
-
-  )
-
 (defn collides?
   "Returns true if [x y] coord is the same as _any_ coord in any of the trails
    OR if it collides with the boundary of the screen."
-  [[x y :as coord] trails [res-x res-y :as resolution]]
-  (println  "coord" coord)
-  (println "trails" trails)
-  (println "reso " resolution)
+  [[[x y :as head-coord] [x2 y2 :as neck-coord] :as head-segment] trails [res-x res-y :as resolution]]
   (or
    (> x res-x)
    (< x 0)
    (> y res-y)
    (< y 0)
    (some
-    (partial trail-collides? coord)
+    (partial trail-collides? head-segment)
     trails)))
 
 (defn mark-colliding-players-as-game-over
-  [{:keys [players] :as state} resolution]
+  [{:keys [players resolution] :as state}]
   (let [trails            (map (fn [[n {:keys [trail]}]]
                                  trail)
                                players)
         game-over-players (->> players
                                (filter (fn [[name {:keys [trail]}]]
-                                         (let [head (peek trail)]
-                                           (collides? head trails resolution))))
+                                         (let [h1 (peek trail)
+                                               h2 (drop-last trail)]
+                                           (collides? [h2 h1] trails resolution))))
                                keys
                                set)]
     (-> state
@@ -167,14 +208,18 @@
 
 (defmethod process-signal
   ::progress-players
-  [state [_ resolution]]
+  [state _]
   ;;updates the :trails of all players, based on their directions
   ;;calculates collisions of the remaining players
   ;;moves crashed players to the game over list
   ;;if it's game over, change :view
-  (-> state
-      update-trails
-      (mark-colliding-players-as-game-over resolution)))
+  (try
+    (-> state
+        update-trails
+        #_mark-colliding-players-as-game-over)
+    (catch js/Error e
+      (debug "Caught err: " state)
+      state)))
 
 (defmethod process-signal
   :default
@@ -209,22 +254,23 @@
     (merge
      cfg
      (cond
-       player-left  {::type      :player-move
+       player-left  {::type      ::player-move
                      ::direction :left
                      ::player    player-left}
-       player-right {::type      :player-move
+       player-right {::type      ::player-move
                      ::direction :right
                      ::player    player-right}
-       start        {::type :start}
-       stop         {::type :stop}))))
+       start        {::type ::start}
+       stop         {::type ::stop}))))
 
 (defn game
   [{:keys [players resolution] :as cfg}] ;;vec of player configs
-  (let [kill-chan     (async/chan)
-        clock-chan    (create-clock kill-chan)
-        key-chan      (async/chan) ;; all input from the keyboard is put on this channel
-        render-chan   (async/chan)]
-    (async/go-loop [game-state {}
+  (let [kill-chan   (async/chan)
+        clock-chan  (create-clock kill-chan)
+        key-chan    (async/chan) ;; all input from the keyboard is put on this channel
+        render-chan (async/chan)]
+    (async/go-loop [game-state (-> (initial-game-state cfg)
+                                   (assoc :view :menu))
                     signal-buffer []]
       (async/alt!
         kill-chan
@@ -235,16 +281,16 @@
 
         clock-chan
         ([_]
-         ;;tick tock
-         (when (seq signal-buffer)
-           (debug signal-buffer))
-         (let [game-state' (reduce process-signal game-state signal-buffer)]
+         (let [buffer      (conj (vec signal-buffer) {::type ::progress-players})
+               game-state' (reduce process-signal game-state buffer)]
            (async/>! render-chan game-state')
            (recur game-state' [])))
 
         key-chan
         ([e]
+         (debug :key-chan e)
          (let [game-event (build-game-event (assoc cfg :key-event e))]
+           (debug :key-chan e game-event)
            (recur game-state (conj signal-buffer game-event))))))
     ;; return this, so that the caller can get a handle on the channels
     ;; to feed it with keyboard events
